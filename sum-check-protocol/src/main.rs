@@ -19,11 +19,6 @@ type Fp5 = Fp64<MontBackend<FrConfig, 1>>;
 fn main() {
     println!("Using Fp5");
 
-    let a = Fp5::from(2);
-    let b = Fp5::from(3);
-    let c = a + b;
-    println!("{:?} + {:?} = {:?}", a,b,c);
-
     // p = 2*x_0^3 + x_0*x_1 + 3*x_1^2
     let p = SparsePolynomial::from_coefficients_vec(
         2, // Number of variables
@@ -33,17 +28,6 @@ fn main() {
             (Fp5::from(3), SparseTerm::new(vec![(1,2)]))
         ]
     );
-
-    println!("p(x0, x1) = {:?}", p);
-
-    println!("p(2,3) = {:?}", SumCheckPolynomial::evaluate(&p,&vec![Fp5::from(2),Fp5::from(3)]).unwrap());
-
-    let fixed_p = p.fix_variables(&[Fp5::from(2)]);
-    println!("p(2,x0) = {:?}", fixed_p);
-
-
-    println!("SHA of 15 = {:?}", Sha256::digest(&15u64.to_le_bytes()));
-
 
     println!("\n\n>>> PROVING TIME <<<\n\n");
     let mut prover = NoninteractiveProver::new(p.clone());
