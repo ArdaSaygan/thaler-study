@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 
-use ark_ff::{Field, Zero};
+use ark_ff::{Field, Zero, PrimeField, BigInteger};
+use ark_ff::field_hashers::{DefaultFieldHasher, HashToField};
 use ark_poly::{
     multivariate::{self, SparseTerm, Term},
     polynomial::DenseMVPolynomial,
@@ -8,6 +9,9 @@ use ark_poly::{
 };
 use ark_std::rand::Rng;
 use bitvec::slice::BitSlice;
+
+use sha2::{Digest, Sha256};
+
 
 pub trait RngF<F> {
     fn draw(&mut self) -> F;
@@ -332,6 +336,221 @@ impl<F: Field, P: SumCheckPolynomial<F>> Verifier<F, P> {
     }
 }
 
+
+
+
+
+
+/// Random Oracle access to retrieve r_i = H(c_i || r_{i-1})
+pub fn random_oracle<F:PrimeField>(c_i : F, r_im1 : Option<F>) -> F {
+    let mut hasher = Sha256::new();
+    let to_field_hasher = <DefaultFieldHasher<Sha256> as HashToField<F>>::new(&[]);
+
+    hasher.update(c_i.into_bigint().to_bytes_be());  // TODO: Replace c_{i-1} with g_{i-1}
+    if r_im1.is_some() {
+        hasher.update(r_im1.unwrap().into_bigint().to_bytes_be());
+    }
+    let hash = hasher.finalize();
+    let r_i = to_field_hasher.hash_to_field::<1>(&hash)[0];
+    r_i
+}
+
+
+// Applying Fiat-Shamir to the protocol
+pub struct NoninteractiveProver<F: Field, P: SumCheckPolynomial<F>> {
+    /// polynomials $g, g_1,...,g_k$
+    /// where g is the original polynomial for which \sum g(x_i) = c_1
+    /// and $g_i = g(r1, r2, ..., ri, ..., x_k)$ 
+    gs: Vec<P>,
+
+    /// sums $c_1, c_2, ..., c_{k+1}$
+    /// 
+    cs : Vec<F>,
+
+    /// s_i polynomials, sent by the Prover
+    /// where $s_1(0)+s_1(1) = c_1$ and $s_i(0)+s_i(1) = \sum g_{i-1}$
+    sis: Vec<univariate::SparsePolynomial<F>>,
+
+    /// Random values $r_1,...,r_{k-1}$ returned from the Random Oracle
+    rs: Vec<F>,
+
+    /// k
+    num_vars: usize,
+
+    /// shows how many rounds are done
+    round: usize,
+}
+
+pub type Proof<F> = (Vec<univariate::SparsePolynomial<F>>, Vec<F>);
+
+impl<F: PrimeField, P: SumCheckPolynomial<F> + std::fmt::Debug> NoninteractiveProver<F, P>{
+    /// Create a new [`NoninteractiveProver`] state with the polynomial $g$.
+    pub fn new(g: P) -> Self {
+        let c_1 = g.to_evaluations().into_iter().sum();
+        let s_1 = g.to_univariate();
+        let num_vars = g.num_vars();
+        Self {
+            gs: vec![g],
+            cs: vec![c_1],
+            sis: vec![s_1],
+            rs: Vec::with_capacity(num_vars),
+            num_vars,
+            round: 0,
+        }
+    }
+
+    /// Run the Prover side of the protocol for round i
+    pub fn round(&mut self) {
+        if self.round > self.num_vars{
+            panic!("Already finished the protocol");
+        }
+
+        // Get the random value from the Random Oracle
+        // Ideally,
+        // r_i = H(g || c_1 || g_1 || r_2 || g_2 || ... || r_{i-1} || g_{i})
+        // For simplicity, we will use
+        // r_i = H(r_{i-1} || c_{i-1})
+        let r_i = random_oracle(*self.cs.last().unwrap(), self.rs.last().copied());
+        
+        // Get g_{i}
+        let g_im1 = self.gs.last().unwrap();
+        let g_i = g_im1.fix_variables(&[r_i]);
+
+        // Get s_i = \sum g_i
+        let s_i = g_i.to_univariate();
+
+        // Get c_{i} = s_i(0) + s_i(1)
+        let c_i = s_i.evaluate(&F::zero()) + s_i.evaluate(&F::one());
+
+        // update the state
+        self.gs.push(g_i);
+        self.cs.push(c_i);
+        self.rs.push(r_i);
+        if self.round < self.num_vars - 1 { // if it's the last round, there are no s_i to send to verifier
+            self.sis.push(s_i);
+        }
+        
+        self.round += 1;
+    }
+    
+    pub fn generate_proof(&mut self) -> Proof<F> {
+        println!("Generating proof for polynomial {:?}", self.gs[0]);
+        println!("Claimed value: {:?}", self.cs[0]);
+        println!("Number of variables: {:?}", self.num_vars);
+
+        for _i in 0..self.num_vars {
+            self.round();
+        }
+
+        (self.sis.clone(), self.rs.clone())
+    }
+}
+
+pub struct NoninteractiveVerifier<F: Field, P: SumCheckPolynomial<F>> {
+    /// Number of variables k in the original polynomial.
+    num_vars: usize,
+
+    /// Polynomial $g$ for which the proof is generated
+    g: P,
+
+    /// A $C_1$ value claimed by the Prover.
+    c_1: F,
+}
+
+impl<F: PrimeField, P: SumCheckPolynomial<F> + std::fmt::Debug> NoninteractiveVerifier<F, P> {
+
+    pub fn new(g:P, c_1:F) -> Self {
+        Self {
+            num_vars: g.num_vars(),
+            g,
+            c_1,
+        }
+    }
+
+    pub fn verify(&self, proof: Proof<F>) -> bool {
+        let (sis, rs) = proof;
+        if sis.len() != self.num_vars || rs.len() != self.num_vars {
+            panic!("Proof is not valid, number of s_i (and r_i) should be equal to number of variables");
+        }
+
+        // Base case, 
+        if sis[0].evaluate(&F::zero()) + sis[0].evaluate(&F::one()) != self.c_1 {
+            println!("Proof is not valid, s_1(0) + s_1(1) != c_1");
+            return false;
+        }
+        let r_1 = random_oracle(self.c_1, None);
+        println!("r_1 = H(c_1 || None), {} = H({}||None)", r_1, self.c_1);
+        if r_1 != rs[0] {
+            println!("Proof is not valid, r_1 != H(c_1)");
+            return false;
+        }
+
+        // Recursive Case
+        let mut c_i = sis[0].evaluate(&r_1);
+        for i in 1..self.num_vars{
+
+            // Is the random value r_i from the Random Oracle correct?
+            // r_i = H(c_i || r_{i-1}) ?
+            if rs[i] != random_oracle(c_i, Some(rs[i-1])){
+                println!("Proof is not valid, r_{} != H(c_{}, r_{})", i+1, i+1 , i);
+                return false;
+            }
+
+            // Is the polynomial s_i correct?
+            if sis[i].evaluate(&F::zero()) + sis[i].evaluate(&F::one()) != c_i {
+                println!("Proof is not valid, s_{}(0) + s_{}(1) != c_{}", i+1,i+1,i+1);
+                return false;
+            }
+
+            // Update c_i to c_{i+1}
+            c_i = sis[i].evaluate(&rs[i]);
+        }
+
+        // Check if g(r1,r2,...,r_k) == c_{k+1}
+        if c_i != self.g.evaluate(&rs).unwrap() {
+            println!("Proof is not valid, c_{} != g(r_1,r_2,...,r_k)", self.num_vars+1);
+            return false;
+        }
+
+        true
+    }
+
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #[cfg(test)]
 mod tests {
     use ark_ff::{
@@ -459,7 +678,7 @@ mod tests {
             }
         }
     }
-
+    
     #[test]
     fn randomized_test() {
         /*
