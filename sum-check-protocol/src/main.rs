@@ -6,8 +6,6 @@ use ark_poly::DenseMVPolynomial;
 
 use sum_check_protocol::SumCheckPolynomial;
 
-use sha2::{Sha256, Digest};
-
 use sum_check_protocol::{NoninteractiveProver, NoninteractiveVerifier};
 
 #[derive(MontConfig)]

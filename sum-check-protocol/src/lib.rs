@@ -444,6 +444,10 @@ impl<F: PrimeField, P: SumCheckPolynomial<F> + std::fmt::Debug> NoninteractivePr
 
         (self.sis.clone(), self.rs.clone())
     }
+
+    pub fn c_1(&self) -> F {
+        self.cs[0]
+    }
 }
 
 pub struct NoninteractiveVerifier<F: Field, P: SumCheckPolynomial<F>> {
@@ -565,7 +569,7 @@ mod tests {
     use ark_std::{rand::Rng, test_rng};
     use pretty_assertions::assert_eq;
 
-    use crate::{Prover, SumCheckPolynomial, Verifier, VerifierRoundResult};
+    use crate::{Prover, SumCheckPolynomial, Verifier, VerifierRoundResult, NoninteractiveProver, NoninteractiveVerifier};
 
     #[derive(MontConfig)]
     #[modulus = "5"]
@@ -738,6 +742,40 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn noninteractive_protocol_test() {
+        for n in 2..10 {
+            let rng = &mut test_rng();
+
+            let g = rand_poly(n, 3, rng);
+
+            let mut prover = NoninteractiveProver::new(g.clone());
+            let c_1 : Fp5 = prover.c_1();
+            let proof = prover.generate_proof();
+
+            let verifier = NoninteractiveVerifier::new(g.clone(), c_1);
+            let res = verifier.verify(proof);
+            assert!(res);
+        }
+    }
+
+    #[test]
+    fn noninteractive_soundness_test() {
+        for n in 2..10 {
+            let rng = &mut test_rng();
+
+            let g = rand_poly(n, 3, rng);
+
+            let mut prover = NoninteractiveProver::new(g.clone());
+            let c_1 : Fp5 = prover.c_1();
+            let proof = prover.generate_proof();
+
+            let verifier = NoninteractiveVerifier::new(g.clone(), c_1+Fp5::one());
+            let res = verifier.verify(proof);
+            assert!(res == false);
         }
     }
 }
