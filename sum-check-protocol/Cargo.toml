@@ -9,6 +9,7 @@ ark-ff.workspace = true
 ark-poly.workspace = true
 ark-std.workspace = true
 bitvec.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
